@@ -31,15 +31,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(title="Swadeshi Voice Translator API",
-              description="Real-time voice and text translation for Indian languages",
-              version="1.0.0")
+app = FastAPI(
+    title="Swadeshi Voice Translator API",
+    description="Real-time voice and text translation for Indian languages",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 translator = Translator()
 supported_langs = LANGUAGES.keys()
-
-# Global state
-connected_devices = {}
 
 # CORS middleware
 app.add_middleware(
@@ -49,6 +50,57 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Language map with enhanced support
+language_map = {
+    "Hindi": ("hi-IN", "hi", "hi"),
+    "English": ("en-US", "en", "en"),
+    "Tamil": ("ta-IN", "ta", "ta"),
+    "Telugu": ("te-IN", "te", "te"),
+    "Bengali": ("bn-IN", "bn", "bn"),
+    "Urdu": ("ur-IN", "ur", "ur"),
+    "Marathi": ("mr-IN", "mr", "mr"),
+    "Gujarati": ("gu-IN", "gu", "gu"),
+    "Kannada": ("kn-IN", "kn", "kn"),
+    "Malayalam": ("ml-IN", "ml", "ml"),
+    "Punjabi": ("pa-IN", "pa", "pa"),
+    "Assamese": ("as-IN", "as", "as"),
+    "Odia": ("or-IN", "or", "or"),
+    "Bhojpuri": ("hi-IN", "hi", "hi"),  # Using Hindi as base
+    "Maithili": ("hi-IN", "hi", "hi"),   # Using Hindi as base
+    "Chhattisgarhi": ("hi-IN", "hi", "hi"),  # Using Hindi as base
+    "Rajasthani": ("hi-IN", "hi", "hi"),  # Using Hindi as base
+    "Konkani": ("hi-IN", "hi", "hi"),    # Using Hindi as base
+    "Dogri": ("hi-IN", "hi", "hi"),      # Using Hindi as base
+    "Kashmiri": ("hi-IN", "hi", "hi"),   # Using Hindi as base
+    "Santhali": ("hi-IN", "hi", "hi"),   # Using Hindi as base
+    "Sindhi": ("hi-IN", "hi", "hi"),     # Using Hindi as base
+    "Manipuri": ("mni-IN", "hi", "mni"), # Meitei/Manipuri
+    "Bodo": ("brx-IN", "hi", "brx"),     # Bodo
+    "Sanskrit": ("sa-IN", "sa", "sa")    # Sanskrit
+}
+
+# WebSocket manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections = {}
+
+    async def connect(self, websocket: WebSocket, device_id: str):
+        await websocket.accept()
+        self.active_connections[device_id] = websocket
+        logger.info(f"Device connected: {device_id}")
+        return websocket
+
+    def disconnect(self, device_id: str):
+        if device_id in self.active_connections:
+            del self.active_connections[device_id]
+            logger.info(f"Device disconnected: {device_id}")
+
+    async def send_message(self, device_id: str, message: str):
+        if device_id in self.active_connections:
+            await self.active_connections[device_id].send_text(message)
+
+manager = ConnectionManager()
 
 # Validation error handler
 @app.exception_handler(RequestValidationError)
@@ -83,28 +135,6 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-# WebSocket manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections = {}
-
-    async def connect(self, websocket: WebSocket, device_id: str):
-        await websocket.accept()
-        self.active_connections[device_id] = websocket
-        logger.info(f"Device connected: {device_id}")
-        return websocket
-
-    def disconnect(self, device_id: str):
-        if device_id in self.active_connections:
-            del self.active_connections[device_id]
-            logger.info(f"Device disconnected: {device_id}")
-
-    async def send_message(self, device_id: str, message: str):
-        if device_id in self.active_connections:
-            await self.active_connections[device_id].send_text(message)
-
-manager = ConnectionManager()
 
 # WebSocket translation route
 @app.websocket("/ws/{src}/{tgt}/{device_id}")
@@ -313,42 +343,15 @@ async def translate_only(req: TextTranslationRequest):
             detail=f"Translation failed: {str(e)}"
         )
 
-# Language map with enhanced support
-language_map = {
-    "Hindi": ("hi-IN", "hi", "hi"),
-    "English": ("en-US", "en", "en"),
-    "Tamil": ("ta-IN", "ta", "ta"),
-    "Telugu": ("te-IN", "te", "te"),
-    "Bengali": ("bn-IN", "bn", "bn"),
-    "Urdu": ("ur-IN", "ur", "ur"),
-    "Marathi": ("mr-IN", "mr", "mr"),
-    "Gujarati": ("gu-IN", "gu", "gu"),
-    "Kannada": ("kn-IN", "kn", "kn"),
-    "Malayalam": ("ml-IN", "ml", "ml"),
-    "Punjabi": ("pa-IN", "pa", "pa"),
-    "Assamese": ("as-IN", "as", "as"),
-    "Odia": ("or-IN", "or", "or"),
-    "Bhojpuri": ("hi-IN", "hi", "hi"),  # Using Hindi as base
-    "Maithili": ("hi-IN", "hi", "hi"),   # Using Hindi as base
-    "Chhattisgarhi": ("hi-IN", "hi", "hi"),  # Using Hindi as base
-    "Rajasthani": ("hi-IN", "hi", "hi"),  # Using Hindi as base
-    "Konkani": ("hi-IN", "hi", "hi"),    # Using Hindi as base
-    "Dogri": ("hi-IN", "hi", "hi"),      # Using Hindi as base
-    "Kashmiri": ("hi-IN", "hi", "hi"),   # Using Hindi as base
-    "Santhali": ("hi-IN", "hi", "hi"),   # Using Hindi as base
-    "Sindhi": ("hi-IN", "hi", "hi"),     # Using Hindi as base
-    "Manipuri": ("mni-IN", "hi", "mni"), # Meitei/Manipuri
-    "Bodo": ("brx-IN", "hi", "brx"),     # Bodo
-    "Sanskrit": ("sa-IN", "sa", "sa")    # Sanskrit
-}
-
-# Start the server
-if __name__ == "__main__":
+def start_server():
     uvicorn.run(
-        app,
+        "main:app",
         host="0.0.0.0",
-        port=10000,
-        reload=True,
-        log_config=None,  # Use default logging config
-        workers=2  # For better concurrency
+        port=int(os.getenv("PORT", "8000")),
+        reload=os.getenv("RELOAD", "false").lower() == "true",
+        workers=int(os.getenv("WORKERS", "1")),
+        log_level="info"
     )
+
+if __name__ == "__main__":
+    start_server()
