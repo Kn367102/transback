@@ -57,9 +57,30 @@ language_map = {
     "English": ("en-US", "en", "en"),
     "Tamil": ("ta-IN", "ta", "ta"),
     "Telugu": ("te-IN", "te", "te"),
-    # ... rest of your language map ...
+    "Bengali": ("bn-IN", "bn", "bn"),
+    "Urdu": ("ur-IN", "ur", "ur"),
+    "Marathi": ("mr-IN", "mr", "mr"),
+    "Gujarati": ("gu-IN", "gu", "gu"),
+    "Kannada": ("kn-IN", "kn", "kn"),
+    "Malayalam": ("ml-IN", "ml", "ml"),
+    "Punjabi": ("pa-IN", "pa", "pa"),
+    "Assamese": ("as-IN", "as", "as"),
+    "Odia": ("or-IN", "or", "or"),
+    "Bhojpuri": ("hi-IN", "hi", "hi"),
+    "Maithili": ("hi-IN", "hi", "hi"),
+    "Chhattisgarhi": ("hi-IN", "hi", "hi"),
+    "Rajasthani": ("hi-IN", "hi", "hi"),
+    "Konkani": ("hi-IN", "hi", "hi"),
+    "Dogri": ("hi-IN", "hi", "hi"),
+    "Kashmiri": ("hi-IN", "hi", "hi"),
+    "Santhali": ("hi-IN", "hi", "hi"),
+    "Sindhi": ("hi-IN", "hi", "hi"),
+    "Manipuri": ("mni-IN", "hi", "mni"),
+    "Bodo": ("brx-IN", "hi", "brx"),
+    "Sanskrit": ("sa-IN", "sa", "sa")
 }
 
+# WebSocket manager
 class ConnectionManager:
     def __init__(self):
         self.active_connections = {}
@@ -81,7 +102,232 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ... [Keep all your existing route handlers] ...
+# Validation error handler
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"Validation error: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+# Root route
+@app.get("/")
+async def root():
+    return {
+        "message": "Swadeshi Voice Translator API",
+        "status": "running",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "text_translation": "/translate-only/",
+            "websocket": "/ws/{src}/{tgt}/{device_id}"
+        }
+    }
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# WebSocket translation route
+@app.websocket("/ws/{src}/{tgt}/{device_id}")
+async def translate_ws(websocket: WebSocket, src: str, tgt: str, device_id: str):
+    logger.info(f"WebSocket connection attempt: {device_id} ({src} → {tgt})")
+    
+    # Validate languages
+    if src not in language_map or tgt not in language_map:
+        await websocket.close(code=1003, reason="Unsupported language")
+        return
+    
+    # Initialize recognizer
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 300
+    
+    src_locale, _, src_code = language_map.get(src, ("hi-IN", "hi", "hi"))
+    _, tgt_tts_lang, tgt_code = language_map.get(tgt, ("hi-IN", "hi", "hi"))
+    
+    # Connect the device
+    await manager.connect(websocket, device_id)
+    
+    try:
+        while True:
+            message = await websocket.receive()
+            
+            if "bytes" in message:
+                audio_chunk = message["bytes"]
+                logger.info(f"Received audio blob from {device_id}: {len(audio_chunk)} bytes")
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as webm_file:
+                    webm_file.write(audio_chunk)
+                    webm_path = webm_file.name
+                
+                wav_path = webm_path.replace(".webm", ".wav")
+                
+                try:
+                    AudioSegment.from_file(webm_path).export(wav_path, format="wav")
+                    logger.info("Audio conversion successful")
+                    
+                    with sr.AudioFile(wav_path) as source:
+                        audio_data = recognizer.record(source)
+                        text = recognizer.recognize_google(audio_data, language=src_locale)
+                        logger.info(f"Recognized text from {device_id}: {text}")
+                        
+                        await websocket.send_text(json.dumps({
+                            "type": "status",
+                            "message": "Speech recognized successfully"
+                        }))
+                        
+                except sr.UnknownValueError:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Could not understand audio"
+                    }))
+                    continue
+                except sr.RequestError as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"Speech recognition error: {str(e)}"
+                    }))
+                    continue
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"Audio processing error: {str(e)}"
+                    }))
+                    continue
+                finally:
+                    with suppress(Exception):
+                        os.remove(webm_path)
+                        os.remove(wav_path)
+            
+            elif "text" in message:
+                try:
+                    data = json.loads(message["text"])
+                    if data.get("type") == "text":
+                        text = data["data"]
+                        logger.info(f"Received text from {device_id}: {text}")
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "error",
+                            "message": "Unsupported message type"
+                        }))
+                        continue
+                except json.JSONDecodeError:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Invalid JSON format"
+                    }))
+                    continue
+            
+            fallback_used = False
+            if src_code not in supported_langs:
+                src_code = "hi"
+                fallback_used = True
+            if tgt_code not in supported_langs:
+                tgt_code = "hi"
+                tgt_tts_lang = "hi"
+                fallback_used = True
+            
+            if fallback_used:
+                await websocket.send_text(json.dumps({
+                    "type": "warning",
+                    "message": "Using Hindi as fallback for unsupported language"
+                }))
+            
+            try:
+                translated = translator.translate(text, src=src_code, dest=tgt_code).text
+                logger.info(f"Translated text for {device_id}: {translated}")
+                
+                await websocket.send_text(json.dumps({
+                    "type": "text",
+                    "data": translated
+                }))
+            except Exception as e:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": f"Translation failed: {str(e)}"
+                }))
+                continue
+            
+            try:
+                tts = gTTS(text=translated, lang=tgt_tts_lang, slow=False)
+                audio_buffer = io.BytesIO()
+                tts.write_to_fp(audio_buffer)
+                audio_buffer.seek(0)
+                
+                for other_id, other_ws in manager.active_connections.items():
+                    if other_id != device_id and other_ws != websocket:
+                        try:
+                            audio_buffer.seek(0)
+                            await other_ws.send_bytes(audio_buffer.read())
+                            logger.info(f"Sent audio to device: {other_id}")
+                        except Exception as e:
+                            logger.error(f"Error sending to {other_id}: {str(e)}")
+                            manager.disconnect(other_id)
+                
+            except Exception as e:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": f"Speech synthesis failed: {str(e)}"
+                }))
+    
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected: {device_id}")
+        manager.disconnect(device_id)
+    except Exception as e:
+        logger.error(f"Unexpected error with {device_id}: {str(e)}")
+        manager.disconnect(device_id)
+        await websocket.close(code=1011, reason=str(e))
+
+# Text translation request model
+class TextTranslationRequest(BaseModel):
+    text: str
+    source_lang: str
+    target_lang: str
+
+# REST API for text translation
+@app.post("/translate-only/")
+async def translate_only(req: TextTranslationRequest):
+    if req.source_lang not in language_map or req.target_lang not in language_map:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported language"
+        )
+    
+    _, _, src_code = language_map.get(req.source_lang, ("hi-IN", "hi", "hi"))
+    _, tgt_tts_lang, tgt_code = language_map.get(req.target_lang, ("hi-IN", "hi", "hi"))
+    
+    fallback_used = False
+    if src_code not in supported_langs:
+        src_code = "hi"
+        fallback_used = True
+    if tgt_code not in supported_langs:
+        tgt_code = "hi"
+        fallback_used = True
+    
+    try:
+        translated_text = translator.translate(req.text, src=src_code, dest=tgt_code).text
+        logger.info(f"Text translated: {req.text[:50]}... → {translated_text[:50]}...")
+        
+        return {
+            "translated_text": translated_text,
+            "source_lang": req.source_lang,
+            "target_lang": req.target_lang,
+            "fallback_used": fallback_used
+        }
+    except Exception as e:
+        logger.error(f"Translation error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Translation failed: {str(e)}"
+        )
 
 def start_server():
     port = int(os.environ.get("PORT", 8000))
