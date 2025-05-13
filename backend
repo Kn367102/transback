@@ -1,3 +1,4 @@
+
 import uvicorn
 import os
 import io
@@ -7,7 +8,7 @@ from contextlib import suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 
@@ -37,7 +38,7 @@ app.add_middleware(
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     print(f"⚠️ Validation error: {exc.errors()}")
-    return await JSONResponse(
+    return JSONResponse(
         status_code=422,
         content={"detail": exc.errors()},
     )
@@ -92,7 +93,6 @@ async def translate_ws(websocket: WebSocket, src: str, tgt: str, device_id: str)
         while True:
             msg = await websocket.receive()
 
-            # Handle audio blob
             if "bytes" in msg:
                 audio_chunk = msg["bytes"]
                 print(f"📥 Received audio blob: {len(audio_chunk)} bytes")
@@ -123,7 +123,6 @@ async def translate_ws(websocket: WebSocket, src: str, tgt: str, device_id: str)
                         os.remove(webm_path)
                         os.remove(wav_path)
 
-            # Handle text message
             elif "text" in msg:
                 try:
                     parsed = json.loads(msg["text"])
@@ -137,7 +136,6 @@ async def translate_ws(websocket: WebSocket, src: str, tgt: str, device_id: str)
                     await websocket.send_text("Invalid JSON format.")
                     continue
 
-            # Translation fallback
             fallback_used = False
             if src_code not in supported_langs:
                 src_code = "hi"
@@ -197,6 +195,6 @@ async def translate_only(req: TextTranslationRequest):
     except Exception as e:
         return {"error": f"Translation failed: {str(e)}"}
 
-# Start the server
+# Run the server
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    uvicorn.run("your_filename:app", host="0.0.0.0", port=10000, reload=True)
